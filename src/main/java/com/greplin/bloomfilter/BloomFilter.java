@@ -41,7 +41,7 @@ public class BloomFilter implements Closeable {
   private byte[] cache = null;
 
   private boolean cacheDirty;
-  private boolean open;
+  private volatile boolean open;
   private final int hashFns;
   private final int realSize;   // the actual size of the bloom filter on disk (metadata, counting bits, etc)
   private final int pseudoSize; // we're equivalent to a non-counting bloom filter with this many positions
