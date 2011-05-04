@@ -20,6 +20,10 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.util.Map;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * A probabalistic set data structure that supports deletions.
@@ -36,19 +40,35 @@ public class BloomFilter implements Closeable {
   private static final int INT_SIZE = 32;
   private static final int META_DATA_OFFSET = 2 * INT_SIZE;
   private static final int BITS_IN_BYTE = 8;
+  private static final int DEFAULT_SEEK_THRESHOLD = 20; // See the TestFileIO class for details on how this was decided
 
-  private RandomAccessFile file = null;
+  private final RandomAccessFile file;
   private byte[] cache = null;
 
-  private boolean cacheDirty;
+  // Note: unflushedChanges is always implemented as a ConcurrentSkipListMap for a few reasons
+  // First, iteration is ordered based on its keys, and its more efficient to seek to each change in order
+  // Second, because it's always small (elements<SEEK_THRESHOLD) the O(log(N)) operations aren't a big deal,
+  // and are almost always outweighed by benefits of being lock-free.
+  // One caveat is that the size() method is O(n) time, so we keep an independent size counter.
+  private final Map<Integer, Byte> unflushedChanges;
+  private final AtomicInteger unflushedChangeCounter = new AtomicInteger(0);
+
+  private volatile boolean cacheDirty;
   private volatile boolean open;
+
+  private final ReentrantReadWriteLock cacheLock = new ReentrantReadWriteLock();
+
+  // how many bytes have to change before we just rewrite the entire file. At some point, a big sequential write
+  // becomes cheaper than a bunch of seeks
+  private final int seekThreshold;
+  
   private final int hashFns;
   private final int realSize;   // the actual size of the bloom filter on disk (metadata, counting bits, etc)
   private final int pseudoSize; // we're equivalent to a non-counting bloom filter with this many positions
   private final RepeatedMurmurHash hash;
 
 
-    /**
+  /**
    * Opens an existing bloom filter.
    *
    * @param f the file to open
@@ -56,9 +76,12 @@ public class BloomFilter implements Closeable {
    * @throws IOException if an I/O error is encountered
    */
   public static synchronized BloomFilter openExisting(File f) throws IOException {
-    return new BloomFilter(f);
+    return openExisting(f, DEFAULT_SEEK_THRESHOLD);
   }
 
+  public static synchronized BloomFilter openExisting(File f, int seekThreshold) throws IOException {
+    return new BloomFilter(f, seekThreshold);
+  }
 
   /**
    * Create an optimal bloom filter for the given expected number of items and desired false positive rate.
@@ -75,19 +98,32 @@ public class BloomFilter implements Closeable {
   public static synchronized BloomFilter createOptimal(File f, int numberOfItems,
                                                        double falsePositiveRate, boolean force)
       throws IOException {
+    return createOptimal(f, numberOfItems, falsePositiveRate, force, DEFAULT_SEEK_THRESHOLD);
+  }
+
+  public static synchronized BloomFilter createOptimal(File f, int numberOfItems,
+                                                       double falsePositiveRate, boolean force,
+                                                       int seekThreshold)
+      throws IOException {
     int bits = (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
         / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
     int hashFns = (int) Math.round(Math.log(2.0) * bits / numberOfItems);
-    return new BloomFilter(f, bits, hashFns, force);
+    return new BloomFilter(f, bits, hashFns, force, seekThreshold);
   }
 
   /**
    * Clears all elements from a bloom filter.
    */
-  public synchronized void clear() {
-    checkIfOpen();
-    cache = new byte[bytes(realSize - META_DATA_OFFSET)];
-    cacheDirty = true;
+  public void clear() {
+    cacheLock.writeLock().lock();
+    try {
+      checkIfOpen();
+      cache = new byte[bytes(realSize - META_DATA_OFFSET)];
+      cacheDirty = true;
+      cacheLock.writeLock().unlock();
+    } finally {
+      cacheLock.writeLock().unlock();
+    }
   }
 
 
@@ -96,12 +132,17 @@ public class BloomFilter implements Closeable {
    *
    * @param data the key
    */
-  public synchronized void add(byte[] data) {
-    checkIfOpen();
-    cacheDirty = true;
+  public void add(byte[] data) {
     int[] toSet = hash.hash(data);
-    for (int i : toSet) {
-      incrementCount(i);
+    cacheLock.writeLock().lock();
+    try {
+      checkIfOpen();
+      for (int i : toSet) {
+        incrementCount(i);
+      }
+      cacheDirty = true;
+    } finally {
+      cacheLock.writeLock().unlock();
     }
   }
 
@@ -111,12 +152,17 @@ public class BloomFilter implements Closeable {
    *
    * @param data the key
    */
-  public synchronized void remove(byte[] data) {
-    checkIfOpen();
-    cacheDirty = true;
+  public void remove(byte[] data) {
     int[] toUnset = hash.hash(data);
-    for (int i : toUnset) {
-      decrementCount(i);
+    cacheLock.writeLock().lock();
+    try {
+      checkIfOpen();
+      for (int i : toUnset) {
+        decrementCount(i);
+      }
+      cacheDirty = true;
+    } finally {
+      cacheLock.writeLock().unlock();
     }
   }
 
@@ -128,13 +174,18 @@ public class BloomFilter implements Closeable {
    * @return whether the key likely is in the bloom filter.  if false, the key is definitely not in the bloom filter.
    *         if true, the key is probably in the bloom filter
    */
-  public synchronized boolean contains(byte[] data) {
-    checkIfOpen();
+  public boolean contains(byte[] data) {
     int[] hash = this.hash.hash(data);
-    for (int i : hash) {
-      if (!this.isSet(i)) {
-        return false;
+    cacheLock.readLock().lock();
+    try {
+      checkIfOpen();
+      for (int i : hash) {
+        if (!this.isSet(i)) {
+          return false;
+        }
       }
+    } finally {
+      cacheLock.readLock().unlock();
     }
     return true;
   }
@@ -145,11 +196,30 @@ public class BloomFilter implements Closeable {
    *
    * @throws IOException if I/O errors are encountered.
    */
-  public synchronized void flush() throws IOException {
-    checkIfOpen();
-    if (file != null && cacheDirty) {
-      file.seek(bytes(META_DATA_OFFSET));
-      file.write(cache); // can probably be made more efficient
+  public void flush() throws IOException {
+    cacheLock.writeLock().lock();
+    try {
+      checkIfOpen();
+      if (cacheDirty && unflushedChanges != null && file != null) {
+        final int offset = bytes(META_DATA_OFFSET);
+
+        //it's actually a disk-backed filter with changes
+        if (unflushedChangeCounter.get() >= seekThreshold) {
+          file.seek(offset);
+          file.write(cache); // can probably be made more efficient
+          file.getFD().sync();
+        } else {
+          for (Map.Entry<Integer, Byte> change : unflushedChanges.entrySet()) {
+            file.seek(change.getKey() + offset);
+            file.write(change.getValue());
+          }
+        }
+        cacheDirty = false;
+        unflushedChanges.clear();
+        unflushedChangeCounter.set(0);
+      }
+    } finally {
+      cacheLock.writeLock().unlock();
     }
   }
 
@@ -159,15 +229,19 @@ public class BloomFilter implements Closeable {
    *
    * @throws IOException if I/O errors are encountered
    */
-  public synchronized void close() throws IOException {
-    if (open) {
-      flush();
-      if (file != null) {
-        file.close();
+  public void close() throws IOException {
+    cacheLock.writeLock().lock();
+    try {
+      if (open) {
+        flush();
+        if (file != null) {
+          file.close();
+        }
+        cache = null;
+        open = false;
       }
-      cache = null;
-      file = null;
-      open = false;
+    } finally {
+      cacheLock.writeLock().unlock();
     }
   }
 
@@ -177,7 +251,7 @@ public class BloomFilter implements Closeable {
     return capacity;
   }
 
-  
+
   /**
    * Computes the number of bytes needed to fit the given number of bits.
    *
@@ -188,6 +262,11 @@ public class BloomFilter implements Closeable {
     return bits / BITS_IN_BYTE + (bits % BITS_IN_BYTE == 0 ? 0 : 1);
   }
 
+  private void checkIfOpen() {
+    if (!open) {
+      throw new IllegalStateException("Can't perform any operations on a closed bloom filter");
+    }
+  }
 
   /**
    * Creates a new bloom filter in the given file.
@@ -196,9 +275,11 @@ public class BloomFilter implements Closeable {
    * @param bits    the number of bits to use
    * @param hashFns the number of hash functions
    * @param force   whether to allow overwriting an existing file
+   * @param seekThreshold How many changes we should take before just rewriting the whole file on flush
    * @throws IOException if an I/O error occurs
    */
-  private BloomFilter(File f, int bits, int hashFns, boolean force) throws IOException {
+  private BloomFilter(File f, int bits, int hashFns, boolean force, int seekThreshold) throws IOException {
+    this.seekThreshold = seekThreshold;
     realSize = bits * COUNT_BITS + META_DATA_OFFSET;
     pseudoSize = bits;
     this.hashFns = hashFns;
@@ -222,36 +303,35 @@ public class BloomFilter implements Closeable {
         }
       }
 
-      file = new RandomAccessFile(f, "rws");
+      file = new RandomAccessFile(f, "rw");
       file.writeInt(hashFns);
       file.writeInt(realSize);
       file.setLength(bytes(realSize));
+      file.getFD().sync();
+      unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
 
-      flush();
-
-      if (f != null && f.length() != bytes(realSize)) {
+      if (f.length() != bytes(realSize)) {
         throw new RuntimeException("Bad size - expected " + bytes(realSize) + " but got " + f.length());
       }
+    } else {
+      unflushedChanges = null; // don't bother keeping track of unflushed changes if this is memory only
+      file = null;
     }
 
-  }
-
-  private void checkIfOpen() {
-    if (!open) {
-      throw new IllegalStateException("Can't perform any operations on a closed bloom filter");
-    }
   }
 
   /**
    * Opens an existing bloom filter.  Access via BloomFilter.openExisting(...)
    *
    * @param f the file to open
+   * @param seekThreshold How many changes we should take before just rewriting the whole file on flush
    * @throws IOException if I/O errors are encountered
    */
-  private BloomFilter(File f) throws IOException {
+  private BloomFilter(File f, int seekThreshold) throws IOException {
     assert f.exists() && f.isFile() && f.canRead() && f.canWrite() : "Trying to open a non-existent bloom filter";
-
-    file = new RandomAccessFile(f, "rws");
+    this.seekThreshold = seekThreshold;
+    file = new RandomAccessFile(f, "rw");
+    unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
 
     hashFns = file.readInt();
     realSize = file.readInt();
@@ -272,6 +352,15 @@ public class BloomFilter implements Closeable {
     open = true;
   }
 
+
+  private void setByte(int position, byte value) {
+    assert cacheLock.isWriteLockedByCurrentThread();
+    cache[position] = value;
+    if (unflushedChanges != null && unflushedChangeCounter.get() < seekThreshold) {
+      unflushedChanges.put(position, value);
+      unflushedChangeCounter.incrementAndGet();
+    }
+  }
 
   /**
    * Increments a count at the given hash table position
@@ -301,13 +390,13 @@ public class BloomFilter implements Closeable {
       myNibble += 1;
       twoNibbles = (byte) (twoNibbles & 0x0F);
       twoNibbles = (byte) (twoNibbles | (myNibble << 4));
-      cache[bytePosition] = twoNibbles;
+      setByte(bytePosition, twoNibbles);
     } else { // odd position - so we want the low nibble
       byte myNibble = (byte) (twoNibbles & 0x0F);
       if (myNibble == MAX_COUNT) {
         return;
       }
-      cache[bytePosition] = (byte) (twoNibbles + 1);
+      setByte(bytePosition, (byte) (twoNibbles + 1));
     }
   }
 
@@ -333,13 +422,13 @@ public class BloomFilter implements Closeable {
       myNibble -= 1;
       twoNibbles = (byte) (twoNibbles & 0x0F);
       twoNibbles = (byte) (twoNibbles | (myNibble << 4));
-      cache[bytePosition] = twoNibbles;
+      setByte(bytePosition, twoNibbles);
     } else { // odd position - so we want the low nibble
       byte myNibble = (byte) (twoNibbles & 0x0F);
       if (myNibble == MAX_COUNT || myNibble == 0) {
         return;
       }
-      cache[bytePosition] = (byte) (twoNibbles - 1);
+      setByte(bytePosition, (byte) (twoNibbles - 1));
     }
   }
 

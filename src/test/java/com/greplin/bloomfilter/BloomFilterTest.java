@@ -147,6 +147,36 @@ public class BloomFilterTest {
   }
 
   @Test
+  public void testSeekThreshold() throws IOException {
+    int[] thresholdsToTest = {0, 1, 2, 5, 10, 100, 1000};
+    for (int i : thresholdsToTest) {
+      BloomFilter bf = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true, i);
+
+      for (String s : IN) {
+        bf.add(s.getBytes());
+        Assert.assertTrue(bf.contains(s.getBytes()));
+      }
+
+      for (String s : OUT) {
+        Assert.assertFalse(bf.contains(s.getBytes()));
+      }
+
+      bf.flush();
+      bf.close();
+
+      bf = BloomFilter.openExisting(TEMP_FILE);
+
+      for (String s : IN) {
+        Assert.assertTrue(bf.contains(s.getBytes()));
+      }
+
+      for (String s : OUT) {
+        Assert.assertFalse(bf.contains(s.getBytes()));
+      }
+    }
+  }
+
+  @Test
   public void testCapacity() throws IOException {
     BloomFilter bf = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true);
     Assert.assertEquals(1000, bf.capacity(0.00001));
