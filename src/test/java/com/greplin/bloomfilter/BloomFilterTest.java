@@ -48,6 +48,18 @@ public class BloomFilterTest {
   }
 
   @Test
+  public void testClear() throws IOException {
+    BloomFilter bf = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true);
+    bf.add("hello".getBytes());
+    Assert.assertTrue(bf.contains("hello".getBytes()));
+    Assert.assertFalse(bf.contains("goodbye".getBytes()));
+
+    bf.clear();
+    Assert.assertFalse(bf.contains("hello".getBytes()));
+    Assert.assertFalse(bf.contains("goodbye".getBytes()));    
+  }
+  
+  @Test
   public void testBasic() throws IOException {
     BloomFilter bf = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true);
 

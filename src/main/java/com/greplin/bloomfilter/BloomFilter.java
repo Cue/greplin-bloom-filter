@@ -120,7 +120,6 @@ public class BloomFilter implements Closeable {
       checkIfOpen();
       cache = new byte[bytes(realSize - META_DATA_OFFSET)];
       cacheDirty = true;
-      cacheLock.writeLock().unlock();
     } finally {
       cacheLock.writeLock().unlock();
     }
