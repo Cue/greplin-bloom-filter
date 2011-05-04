@@ -16,7 +16,7 @@ import java.io.RandomAccessFile;
  * On our test machine, seeking and writing was faster than sequential writes while there were less than ~20
  * bytes to change.
  */
-public class TestFileIO {
+public class SeekSequentialWriteBenchmark {
   private static final int SIZE = 1024 * 1024;
   private static final int TRIALS = 50;
 
