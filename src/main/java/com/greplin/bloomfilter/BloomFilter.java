@@ -61,7 +61,7 @@ public class BloomFilter implements Closeable {
   // how many bytes have to change before we just rewrite the entire file. At some point, a big sequential write
   // becomes cheaper than a bunch of seeks
   private final int seekThreshold;
-  
+
   private final int hashFns;
   private final int realSize;   // the actual size of the bloom filter on disk (metadata, counting bits, etc)
   private final int pseudoSize; // we're equivalent to a non-counting bloom filter with this many positions
@@ -75,11 +75,11 @@ public class BloomFilter implements Closeable {
    * @return the bloom filter
    * @throws IOException if an I/O error is encountered
    */
-  public static synchronized BloomFilter openExisting(File f) throws IOException {
+  public static BloomFilter openExisting(File f) throws IOException {
     return openExisting(f, DEFAULT_SEEK_THRESHOLD);
   }
 
-  public static synchronized BloomFilter openExisting(File f, int seekThreshold) throws IOException {
+  public static BloomFilter openExisting(File f, int seekThreshold) throws IOException {
     return new BloomFilter(f, seekThreshold);
   }
 
@@ -95,15 +95,15 @@ public class BloomFilter implements Closeable {
    * @return a bloom filter backed by the file
    * @throws IOException if I/O errors are encountered
    */
-  public static synchronized BloomFilter createOptimal(File f, int numberOfItems,
-                                                       double falsePositiveRate, boolean force)
+  public static BloomFilter createOptimal(File f, int numberOfItems,
+                                          double falsePositiveRate, boolean force)
       throws IOException {
     return createOptimal(f, numberOfItems, falsePositiveRate, force, DEFAULT_SEEK_THRESHOLD);
   }
 
-  public static synchronized BloomFilter createOptimal(File f, int numberOfItems,
-                                                       double falsePositiveRate, boolean force,
-                                                       int seekThreshold)
+  public static BloomFilter createOptimal(File f, int numberOfItems,
+                                          double falsePositiveRate, boolean force,
+                                          int seekThreshold)
       throws IOException {
     int bits = (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
         / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
