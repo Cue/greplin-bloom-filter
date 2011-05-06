@@ -11,15 +11,13 @@ An (optionally persistent) counting Bloom Filter implementation in Java.
 This is a very early stage project.  It works for our needs.  We haven't verified it works beyond that.  Issue reports
 and patches are very much appreciated!
 
-For example, some obvious improvements include
+Some improvements we'd love to see include:
 
-* Support for a variable number of count bits (including 1)
-
-* More efficient thread safety
+* Optimized special case code paths for particular sized counting buckets
 
 * More hash functions to choose between
 
-* More efficient disk persistence
+* Variable cache sizes and types. Enabling, for example, a lower-memory read only mode or a smaller cache that performs disk seeks to perform some operations
 
 ### Pre-requisites:
 

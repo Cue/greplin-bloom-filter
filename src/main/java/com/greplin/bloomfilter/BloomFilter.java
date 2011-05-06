@@ -35,12 +35,35 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class BloomFilter implements Closeable {
 
-  private static final int COUNT_BITS = 4; //DO NOT CHANGE. LOTS OF ASSUMPTIONS DEPEND ON THIS BEING 4
-  private static final byte MAX_COUNT = (1 << COUNT_BITS) - 1;
+  public static enum BucketSize {
+    ONE(1),
+    TWO(2),
+    FOUR(4),
+    EIGHT(8);
+
+    private final int bits;
+
+    BucketSize(int bits) {
+      this.bits = bits;
+    }
+
+    public int getBits() {
+      return bits;
+    }
+  }
+
+  // do not change or you'll break backwards compatibility with serialized bloom filters created before we supported
+  // a variable number of count bits
+  private static final BucketSize DEFAULT_BUCKET_BITS = BucketSize.FOUR;
+
   private static final int INT_SIZE = 32;
   private static final int META_DATA_OFFSET = 2 * INT_SIZE;
   private static final int BITS_IN_BYTE = 8;
   private static final int DEFAULT_SEEK_THRESHOLD = 20; // See the TestFileIO class for details on how this was decided
+
+  private final BucketSize countBits;
+  private final int maxCount;
+  private final int bucketsPerByte;
 
   private final RandomAccessFile file;
   private byte[] cache = null;
@@ -76,11 +99,11 @@ public class BloomFilter implements Closeable {
    * @throws IOException if an I/O error is encountered
    */
   public static BloomFilter openExisting(File f) throws IOException {
-    return openExisting(f, DEFAULT_SEEK_THRESHOLD);
+    return openExisting(f, DEFAULT_SEEK_THRESHOLD, DEFAULT_BUCKET_BITS);
   }
 
-  public static BloomFilter openExisting(File f, int seekThreshold) throws IOException {
-    return new BloomFilter(f, seekThreshold);
+  public static BloomFilter openExisting(File f, int seekThreshold, BucketSize countBits) throws IOException {
+    return new BloomFilter(f, seekThreshold, countBits);
   }
 
   /**
@@ -98,17 +121,18 @@ public class BloomFilter implements Closeable {
   public static BloomFilter createOptimal(File f, int numberOfItems,
                                           double falsePositiveRate, boolean force)
       throws IOException {
-    return createOptimal(f, numberOfItems, falsePositiveRate, force, DEFAULT_SEEK_THRESHOLD);
+    return createOptimal(f, numberOfItems, falsePositiveRate, force, DEFAULT_SEEK_THRESHOLD, DEFAULT_BUCKET_BITS);
   }
 
   public static BloomFilter createOptimal(File f, int numberOfItems,
                                           double falsePositiveRate, boolean force,
-                                          int seekThreshold)
+                                          int seekThreshold,
+                                          BucketSize countBits)
       throws IOException {
     int bits = (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
         / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
     int hashFns = (int) Math.round(Math.log(2.0) * bits / numberOfItems);
-    return new BloomFilter(f, bits, hashFns, force, seekThreshold);
+    return new BloomFilter(f, bits, hashFns, force, seekThreshold, countBits);
   }
 
   /**
@@ -270,16 +294,20 @@ public class BloomFilter implements Closeable {
   /**
    * Creates a new bloom filter in the given file.
    *
-   * @param f       the file to write to. If null, the bloom filter is just created in RAM
-   * @param bits    the number of bits to use
-   * @param hashFns the number of hash functions
-   * @param force   whether to allow overwriting an existing file
+   * @param f             the file to write to. If null, the bloom filter is just created in RAM
+   * @param bits          the number of bits to use
+   * @param hashFns       the number of hash functions
+   * @param force         whether to allow overwriting an existing file
    * @param seekThreshold How many changes we should take before just rewriting the whole file on flush
    * @throws IOException if an I/O error occurs
    */
-  private BloomFilter(File f, int bits, int hashFns, boolean force, int seekThreshold) throws IOException {
+  private BloomFilter(File f, int bits, int hashFns, boolean force, int seekThreshold, BucketSize countBits) throws IOException {
     this.seekThreshold = seekThreshold;
-    realSize = bits * COUNT_BITS + META_DATA_OFFSET;
+    this.countBits = countBits;
+    this.maxCount = (1 << this.countBits.getBits()) - 1;
+    this.bucketsPerByte = BITS_IN_BYTE / this.countBits.getBits();
+
+    realSize = bits * this.countBits.getBits() + META_DATA_OFFSET;
     pseudoSize = bits;
     this.hashFns = hashFns;
     hash = new RepeatedMurmurHash(hashFns, pseudoSize);
@@ -322,19 +350,23 @@ public class BloomFilter implements Closeable {
   /**
    * Opens an existing bloom filter.  Access via BloomFilter.openExisting(...)
    *
-   * @param f the file to open
+   * @param f             the file to open
    * @param seekThreshold How many changes we should take before just rewriting the whole file on flush
    * @throws IOException if I/O errors are encountered
    */
-  private BloomFilter(File f, int seekThreshold) throws IOException {
+  private BloomFilter(File f, int seekThreshold, BucketSize countBits) throws IOException {
     assert f.exists() && f.isFile() && f.canRead() && f.canWrite() : "Trying to open a non-existent bloom filter";
+    this.countBits = countBits;
+    this.maxCount = (1 << this.countBits.getBits()) - 1;
+    this.bucketsPerByte = BITS_IN_BYTE / this.countBits.getBits();
     this.seekThreshold = seekThreshold;
     file = new RandomAccessFile(f, "rw");
     unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
 
     hashFns = file.readInt();
     realSize = file.readInt();
-    pseudoSize = (realSize - META_DATA_OFFSET) / COUNT_BITS;
+    assert (realSize - META_DATA_OFFSET) % this.countBits.getBits() == 0;
+    pseudoSize = (realSize - META_DATA_OFFSET) / this.countBits.getBits();
 
     if (f.length() != bytes(realSize)) {
       throw new IllegalStateException(
@@ -361,74 +393,46 @@ public class BloomFilter implements Closeable {
     }
   }
 
-  /**
-   * Increments a count at the given hash table position
-   *
-   * @param position the position within pseudoSize
-   */
-  private void incrementCount(int position) {
-    assert position >= 0 && position < pseudoSize;
-    // I can only get/set bytes, but I want nibbles (4 bits). imagine we're looking at a 4 position filter:
-    // 0000 0001 0010 0011
-    // and let's say I'm interested in  position '1' (= 0001)
-    // I have to get the full byte at position '0' (= 0000 0001),
-    // and then store back a full byte (= 0000 0010) leaving me with the full result:
-    // 0000 0010 0010 0011
 
-    int bytePosition = position / 2;
-    assert bytePosition < realSize;
-    byte twoNibbles = cache[bytePosition];
+  // return the integer value of a (possibly improper) subset of bits from a given byte.
+  // e.g., if byte x = 01101101, then getNumAt(x, 0, 2) = b01 = d1
+  // or getNumAt(x, 4, 4) = b1101 = d13
+  protected static byte getBucketAt(byte data, final int offset, final int len) {
+    assert offset < BITS_IN_BYTE;
+    assert len <= BITS_IN_BYTE;
+    assert offset + len <= BITS_IN_BYTE;
 
-    if ((position & 1) == 0) {
-      // even position - so we want the high nibble
-      byte myNibble = (byte) ((twoNibbles & 0xff) >>> 4);
-      if (myNibble == MAX_COUNT) {
-        return;
-      }
-      // can't just add 0x10 to twoNibblees because java can't do unsigned arithmetic
-      myNibble += 1;
-      twoNibbles = (byte) (twoNibbles & 0x0F);
-      twoNibbles = (byte) (twoNibbles | (myNibble << 4));
-      setByte(bytePosition, twoNibbles);
-    } else { // odd position - so we want the low nibble
-      byte myNibble = (byte) (twoNibbles & 0x0F);
-      if (myNibble == MAX_COUNT) {
-        return;
-      }
-      setByte(bytePosition, (byte) (twoNibbles + 1));
-    }
+    // shift so the bits we want are right-most
+    final int shift = (BITS_IN_BYTE - (offset + len));
+    data = (byte) (data >>> shift);
+
+    // zero out everything to the left of what we're interested in
+    // Java needs the 0xFF & 0xFF since it doesn't have unsigned types, and silently converts bytes to ints. Don't ask.
+    final byte mask = (byte) ((0xFF & 0xFF) >> (BITS_IN_BYTE - len));
+    data = (byte) (data & mask);
+
+    return data;
   }
 
+  protected static byte putBucketAt(final byte wholeByte, int offset, int len, byte bucketVal) {
+    assert offset < BITS_IN_BYTE;
+    assert len <= BITS_IN_BYTE;
+    assert offset + len <= BITS_IN_BYTE;
+    assert bucketVal <= ((1 << len) - 1);
 
-  /**
-   * Decrements a count at the given hash table position
-   *
-   * @param position the position within pseudoSize
-   */
-  private void decrementCount(int position) {
-    assert position >= 0 && position < pseudoSize;
+    byte res = wholeByte;
 
-    int bytePosition = position / 2;
-    assert bytePosition < realSize;
-    byte twoNibbles = cache[bytePosition];
+    // first we want to clear the old value of the bucket
+    byte mask = (byte) ((1 << len) - 1);
+    mask <<= (BITS_IN_BYTE - (offset + len));
+    mask = (byte) ~mask; // this is a little annoying, but it works for buckets that are in the 'middle' of a byte
+    res &= mask;
 
-    if ((position & 1) == 0) {
-      // even position - so we want the high nibble
-      byte myNibble = (byte) ((twoNibbles & 0xff) >>> 4);
-      if (myNibble == MAX_COUNT || myNibble == 0) { // can't decr a MAX_COUNT
-        return;
-      }
-      myNibble -= 1;
-      twoNibbles = (byte) (twoNibbles & 0x0F);
-      twoNibbles = (byte) (twoNibbles | (myNibble << 4));
-      setByte(bytePosition, twoNibbles);
-    } else { // odd position - so we want the low nibble
-      byte myNibble = (byte) (twoNibbles & 0x0F);
-      if (myNibble == MAX_COUNT || myNibble == 0) {
-        return;
-      }
-      setByte(bytePosition, (byte) (twoNibbles - 1));
-    }
+    // then we want to set the bits in the bucket correctly
+    bucketVal <<= (BITS_IN_BYTE - (offset + len));
+    res |= bucketVal;
+
+    return res;
   }
 
 
@@ -440,12 +444,64 @@ public class BloomFilter implements Closeable {
    */
   private boolean isSet(int position) {
     assert position >= 0 && position < pseudoSize;
-    if ((position & 1) == 0) {
-      return cache[position / 2] >>> 4 != 0; // don't need to correct for sign/upconverting (it's still != 0)
-    } else {
-      // low nibble
-      return (cache[position / 2] & 0x0F) != 0;
+    final int indexOfByteContainingBucket = position / this.bucketsPerByte;
+    assert indexOfByteContainingBucket < realSize;
+
+    final int offsetOfBucketInByte = (position % this.bucketsPerByte) * this.countBits.getBits();
+    final byte byteContainingBucket = cache[indexOfByteContainingBucket];
+    final byte bucketVal = getBucketAt(byteContainingBucket, offsetOfBucketInByte, this.countBits.getBits());
+
+    return bucketVal != 0;
+  }
+
+  // if decr is false, then it's an incr
+  private void modifyBucket(int position, boolean decr) {
+    assert position >= 0 && position < pseudoSize;
+
+    final int indexOfByteContainingBucket = position / this.bucketsPerByte;
+    assert indexOfByteContainingBucket < realSize;
+    final byte byteContainingBucket = cache[indexOfByteContainingBucket];
+
+    final int offsetOfBucketInByte = (position % this.bucketsPerByte) * this.countBits.getBits();
+    final int bucket = getBucketAt(byteContainingBucket, offsetOfBucketInByte, this.countBits.getBits());
+
+    // bucket is overflowing, can't do anything
+    if (bucket == maxCount) {
+      return;
     }
+
+    assert bucket < maxCount;
+
+    int newBucketVal;
+    if (decr) {
+      newBucketVal = bucket - 1;
+    } else {
+      newBucketVal = bucket + 1;
+    }
+
+    byte newVal =
+        putBucketAt(byteContainingBucket, offsetOfBucketInByte, this.countBits.getBits(), (byte) newBucketVal);
+    setByte(indexOfByteContainingBucket, newVal);
+  }
+
+
+  /**
+   * Increments a count at the given hash table position
+   *
+   * @param position the position within pseudoSize
+   */
+  private void incrementCount(int position) {
+    modifyBucket(position, false);
+  }
+
+
+  /**
+   * Decrements a count at the given hash table position
+   *
+   * @param position the position within pseudoSize
+   */
+  private void decrementCount(int position) {
+    modifyBucket(position, true);
   }
 
   // just for testing
