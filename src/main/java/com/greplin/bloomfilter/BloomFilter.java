@@ -35,26 +35,11 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class BloomFilter implements Closeable {
 
-  public static enum BucketSize {
-    ONE(1),
-    TWO(2),
-    FOUR(4),
-    EIGHT(8);
-
-    private final int bits;
-
-    BucketSize(int bits) {
-      this.bits = bits;
-    }
-
-    public int getBits() {
-      return bits;
-    }
-  }
-
   // do not change or you'll break backwards compatibility with serialized bloom filters created before we supported
   // a variable number of count bits
   private static final BucketSize DEFAULT_BUCKET_BITS = BucketSize.FOUR;
+
+
 
   private static final int INT_SIZE = 32;
   private static final int META_DATA_OFFSET = 2 * INT_SIZE;

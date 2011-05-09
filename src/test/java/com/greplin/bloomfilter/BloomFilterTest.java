@@ -163,7 +163,7 @@ public class BloomFilterTest {
   public void testSeekThreshold() throws IOException {
     int[] thresholdsToTest = {0, 1, 2, 5, 10, 100, 1000};
     for (int i : thresholdsToTest) {
-      BloomFilter bf = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true, i, BloomFilter.BucketSize.FOUR);
+      BloomFilter bf = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true, i, BucketSize.FOUR);
 
       for (String s : IN) {
         bf.add(s.getBytes());
@@ -198,7 +198,7 @@ public class BloomFilterTest {
   @Test
   public void testBucketSizes() throws IOException {
 
-    for (BloomFilter.BucketSize bucketSize : BloomFilter.BucketSize.values()) {
+    for (BucketSize bucketSize : BucketSize.values()) {
       BloomFilter bf = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true, 20, bucketSize);
       for (String s : IN) {
         bf.add(s.getBytes());
@@ -213,7 +213,7 @@ public class BloomFilterTest {
         Assert.assertTrue(bf.contains(s.getBytes()));
         bf.remove(s.getBytes());
 
-        if (bucketSize != BloomFilter.BucketSize.ONE) { // can't remove items with bucket size of 1
+        if (bucketSize != BucketSize.ONE) { // can't remove items with bucket size of 1
           Assert.assertFalse(bf.contains(s.getBytes()));
         }
       }
@@ -266,7 +266,7 @@ public class BloomFilterTest {
   @Test
   public void testFalsePositiveRate() throws IOException {
 
-    for (BloomFilter.BucketSize bucketSize : BloomFilter.BucketSize.values()) {
+    for (BucketSize bucketSize : BucketSize.values()) {
       BloomFilter bf = BloomFilter.createOptimal(null, 1000, 0.01, false, 20, bucketSize);
 
       Random r = new Random();
