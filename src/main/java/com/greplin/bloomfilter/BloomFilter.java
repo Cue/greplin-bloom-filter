@@ -35,20 +35,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class BloomFilter implements Closeable {
 
-  // do not change or you'll break backwards compatibility with serialized bloom filters created before we supported
-  // a variable number of count bits
-  private static final BucketSize DEFAULT_BUCKET_BITS = BucketSize.FOUR;
-
-
-
-  private static final int INT_SIZE = 32;
-  private static final int META_DATA_OFFSET = 2 * INT_SIZE;
   private static final int BITS_IN_BYTE = 8;
   private static final int DEFAULT_SEEK_THRESHOLD = 20; // See the TestFileIO class for details on how this was decided
-
-  private final BucketSize countBits;
-  private final int maxCount;
-  private final int bucketsPerByte;
+  private static final BucketSize DEFAULT_BUCKET_SIZE = BucketSize.FOUR;
 
   private final RandomAccessFile file;
   private byte[] cache = null;
@@ -70,10 +59,8 @@ public class BloomFilter implements Closeable {
   // becomes cheaper than a bunch of seeks
   private final int seekThreshold;
 
-  private final int hashFns;
-  private final int realSize;   // the actual size of the bloom filter on disk (metadata, counting bits, etc)
-  private final int pseudoSize; // we're equivalent to a non-counting bloom filter with this many positions
   private final RepeatedMurmurHash hash;
+  private BloomMetadata metadata;
 
 
   /**
@@ -84,11 +71,11 @@ public class BloomFilter implements Closeable {
    * @throws IOException if an I/O error is encountered
    */
   public static BloomFilter openExisting(File f) throws IOException {
-    return openExisting(f, DEFAULT_SEEK_THRESHOLD, DEFAULT_BUCKET_BITS);
+    return openExisting(f, DEFAULT_SEEK_THRESHOLD);
   }
 
-  public static BloomFilter openExisting(File f, int seekThreshold, BucketSize countBits) throws IOException {
-    return new BloomFilter(f, seekThreshold, countBits);
+  public static BloomFilter openExisting(File f, int seekThreshold) throws IOException {
+    return new BloomFilter(f, seekThreshold);
   }
 
   /**
@@ -106,7 +93,7 @@ public class BloomFilter implements Closeable {
   public static BloomFilter createOptimal(File f, int numberOfItems,
                                           double falsePositiveRate, boolean force)
       throws IOException {
-    return createOptimal(f, numberOfItems, falsePositiveRate, force, DEFAULT_SEEK_THRESHOLD, DEFAULT_BUCKET_BITS);
+    return createOptimal(f, numberOfItems, falsePositiveRate, force, DEFAULT_SEEK_THRESHOLD, DEFAULT_BUCKET_SIZE);
   }
 
   public static BloomFilter createOptimal(File f, int numberOfItems,
@@ -114,10 +101,10 @@ public class BloomFilter implements Closeable {
                                           int seekThreshold,
                                           BucketSize countBits)
       throws IOException {
-    int bits = (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
+    int buckets = (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
         / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
-    int hashFns = (int) Math.round(Math.log(2.0) * bits / numberOfItems);
-    return new BloomFilter(f, bits, hashFns, force, seekThreshold, countBits);
+    int hashFns = (int) Math.round(Math.log(2.0) * buckets / numberOfItems);
+    return new BloomFilter(f, buckets, hashFns, force, seekThreshold, countBits);
   }
 
   /**
@@ -127,7 +114,7 @@ public class BloomFilter implements Closeable {
     cacheLock.writeLock().lock();
     try {
       checkIfOpen();
-      cache = new byte[bytes(realSize - META_DATA_OFFSET)];
+      cache = new byte[this.metadata.getTotalLength() - this.metadata.getHeaderLength()];
       cacheDirty = true;
     } finally {
       cacheLock.writeLock().unlock();
@@ -209,7 +196,7 @@ public class BloomFilter implements Closeable {
     try {
       checkIfOpen();
       if (cacheDirty && unflushedChanges != null && file != null) {
-        final int offset = bytes(META_DATA_OFFSET);
+        final int offset = this.metadata.getHeaderLength();
 
         //it's actually a disk-backed filter with changes
         if (unflushedChangeCounter.get() >= seekThreshold) {
@@ -254,21 +241,11 @@ public class BloomFilter implements Closeable {
   }
 
   public int capacity(double falsePositiveRate) {
-    int capacity = (int) Math.round((pseudoSize * Math.log(1.0 / Math.pow(2.0, Math.log(2.0))))
+    int capacity = (int) Math.round((this.metadata.getBucketCount() * Math.log(1.0 / Math.pow(2.0, Math.log(2.0))))
         / Math.log(falsePositiveRate));
     return capacity;
   }
 
-
-  /**
-   * Computes the number of bytes needed to fit the given number of bits.
-   *
-   * @param bits the number of bits
-   * @return the number of bytes required
-   */
-  private static int bytes(int bits) {
-    return bits / BITS_IN_BYTE + (bits % BITS_IN_BYTE == 0 ? 0 : 1);
-  }
 
   private void checkIfOpen() {
     if (!open) {
@@ -280,25 +257,20 @@ public class BloomFilter implements Closeable {
    * Creates a new bloom filter in the given file.
    *
    * @param f             the file to write to. If null, the bloom filter is just created in RAM
-   * @param bits          the number of bits to use
+   * @param buckets          the number of bits to use
    * @param hashFns       the number of hash functions
    * @param force         whether to allow overwriting an existing file
    * @param seekThreshold How many changes we should take before just rewriting the whole file on flush
    * @throws IOException if an I/O error occurs
    */
-  private BloomFilter(File f, int bits, int hashFns, boolean force, int seekThreshold, BucketSize countBits) throws IOException {
+  private BloomFilter(File f, int buckets, int hashFns, boolean force, int seekThreshold, BucketSize countBits)
+      throws IOException {
     this.seekThreshold = seekThreshold;
-    this.countBits = countBits;
-    this.maxCount = (1 << this.countBits.getBits()) - 1;
-    this.bucketsPerByte = BITS_IN_BYTE / this.countBits.getBits();
-
-    realSize = bits * this.countBits.getBits() + META_DATA_OFFSET;
-    pseudoSize = bits;
-    this.hashFns = hashFns;
-    hash = new RepeatedMurmurHash(hashFns, pseudoSize);
+    this.metadata = BloomMetadata.createNew(buckets, hashFns, countBits);
+    hash = new RepeatedMurmurHash(hashFns, this.metadata.getBucketCount());
 
     // creating a new filter - so I can just be lazy and start it zero'd
-    cache = new byte[bytes(realSize - META_DATA_OFFSET)];
+    cache = new byte[this.metadata.getTotalLength() - this.metadata.getHeaderLength()];
     cacheDirty = true;
 
     open = true;
@@ -316,14 +288,13 @@ public class BloomFilter implements Closeable {
       }
 
       file = new RandomAccessFile(f, "rw");
-      file.writeInt(hashFns);
-      file.writeInt(realSize);
-      file.setLength(bytes(realSize));
+      this.metadata.writeToFile(file);
+      file.setLength(metadata.getTotalLength());
       file.getFD().sync();
       unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
 
-      if (f.length() != bytes(realSize)) {
-        throw new RuntimeException("Bad size - expected " + bytes(realSize) + " but got " + f.length());
+      if (f.length() != metadata.getTotalLength()) {
+        throw new RuntimeException("Bad size - expected " + metadata.getTotalLength() + " but got " + f.length());
       }
     } else {
       unflushedChanges = null; // don't bother keeping track of unflushed changes if this is memory only
@@ -339,32 +310,22 @@ public class BloomFilter implements Closeable {
    * @param seekThreshold How many changes we should take before just rewriting the whole file on flush
    * @throws IOException if I/O errors are encountered
    */
-  private BloomFilter(File f, int seekThreshold, BucketSize countBits) throws IOException {
+  private BloomFilter(File f, int seekThreshold) throws IOException {
     assert f.exists() && f.isFile() && f.canRead() && f.canWrite() : "Trying to open a non-existent bloom filter";
-    this.countBits = countBits;
-    this.maxCount = (1 << this.countBits.getBits()) - 1;
-    this.bucketsPerByte = BITS_IN_BYTE / this.countBits.getBits();
     this.seekThreshold = seekThreshold;
+
     file = new RandomAccessFile(f, "rw");
+    this.metadata = BloomMetadata.readHeader(file);
     unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
 
-    hashFns = file.readInt();
-    realSize = file.readInt();
-    assert (realSize - META_DATA_OFFSET) % this.countBits.getBits() == 0;
-    pseudoSize = (realSize - META_DATA_OFFSET) / this.countBits.getBits();
-
-    if (f.length() != bytes(realSize)) {
-      throw new IllegalStateException(
-          "Corrupted Bloom Filter: file size is " + f.length() + " but claims " + bytes(realSize));
-    }
-
     // load the cache with the on disk data
-    cache = new byte[bytes(realSize - META_DATA_OFFSET)];
+    cache = new byte[metadata.getTotalLength() - metadata.getHeaderLength()];
     int readRes = file.read(cache);
-    assert readRes == bytes(realSize - META_DATA_OFFSET)
-        : "I only read " + readRes + " bytes, but was expecting " + bytes(realSize - META_DATA_OFFSET);
+    assert readRes == (metadata.getTotalLength() - metadata.getHeaderLength())
+        : "I only read " + readRes + " bytes, but was expecting " + (metadata.getTotalLength()
+        - metadata.getHeaderLength());
 
-    hash = new RepeatedMurmurHash(hashFns, pseudoSize);
+    hash = new RepeatedMurmurHash(metadata.getHashFns(), metadata.getBucketCount());
     open = true;
   }
 
@@ -422,40 +383,42 @@ public class BloomFilter implements Closeable {
 
 
   /**
-   * Checks if the given position is set at least once.
+   * Checks if the given bucket has a count of at least one.
    *
-   * @param position the position within pseudosize
+   * @param bucket - the bucket you're interested in
    * @return whether it is set
    */
-  private boolean isSet(int position) {
-    assert position >= 0 && position < pseudoSize;
-    final int indexOfByteContainingBucket = position / this.bucketsPerByte;
-    assert indexOfByteContainingBucket < realSize;
+  private boolean isSet(int bucket) {
+    assert bucket >= 0 && bucket < this.metadata.getBucketCount();
+    final int indexOfByteContainingBucket = bucket / this.metadata.getBucketsPerByte();
+    assert indexOfByteContainingBucket < this.metadata.getTotalLength();
 
-    final int offsetOfBucketInByte = (position % this.bucketsPerByte) * this.countBits.getBits();
+    final int offsetOfBucketInByte = (bucket % this.metadata.getBucketsPerByte())
+        * this.metadata.getBucketSize().getBits();
     final byte byteContainingBucket = cache[indexOfByteContainingBucket];
-    final byte bucketVal = getBucketAt(byteContainingBucket, offsetOfBucketInByte, this.countBits.getBits());
+    final byte bucketVal = getBucketAt(byteContainingBucket, offsetOfBucketInByte,
+        this.metadata.getBucketSize().getBits());
 
     return bucketVal != 0;
   }
 
   // if decr is false, then it's an incr
   private void modifyBucket(int position, boolean decr) {
-    assert position >= 0 && position < pseudoSize;
+    assert position >= 0 && position < this.metadata.getBucketCount();
 
-    final int indexOfByteContainingBucket = position / this.bucketsPerByte;
-    assert indexOfByteContainingBucket < realSize;
+    final int indexOfByteContainingBucket = position / this.metadata.getBucketsPerByte();
+    assert indexOfByteContainingBucket < this.metadata.getTotalLength();
     final byte byteContainingBucket = cache[indexOfByteContainingBucket];
 
-    final int offsetOfBucketInByte = (position % this.bucketsPerByte) * this.countBits.getBits();
-    final int bucket = getBucketAt(byteContainingBucket, offsetOfBucketInByte, this.countBits.getBits());
+    final int offsetOfBucketInByte = (position % this.metadata.getBucketsPerByte()) * this.metadata.getBucketSize().getBits();
+    final int bucket = getBucketAt(byteContainingBucket, offsetOfBucketInByte, this.metadata.getBucketSize().getBits());
 
     // bucket is overflowing, can't do anything
-    if (bucket == maxCount) {
+    if (bucket == this.metadata.getMaxCountInBucket()) {
       return;
     }
 
-    assert bucket < maxCount;
+    assert bucket < this.metadata.getMaxCountInBucket();
 
     int newBucketVal;
     if (decr) {
@@ -465,28 +428,27 @@ public class BloomFilter implements Closeable {
     }
 
     byte newVal =
-        putBucketAt(byteContainingBucket, offsetOfBucketInByte, this.countBits.getBits(), (byte) newBucketVal);
+        putBucketAt(byteContainingBucket, offsetOfBucketInByte, this.metadata.getBucketSize().getBits(), (byte) newBucketVal);
     setByte(indexOfByteContainingBucket, newVal);
   }
 
 
   /**
-   * Increments a count at the given hash table position
+   * Increments the count in a given bucket
    *
-   * @param position the position within pseudoSize
+   * @param bucket - which bucket to increment
    */
-  private void incrementCount(int position) {
-    modifyBucket(position, false);
+  private void incrementCount(int bucket) {
+    modifyBucket(bucket, false);
   }
 
 
   /**
-   * Decrements a count at the given hash table position
+   * Decrements the count in a given bucket
    *
-   * @param position the position within pseudoSize
-   */
-  private void decrementCount(int position) {
-    modifyBucket(position, true);
+   * @param bucket - which bucket to increment
+   */  private void decrementCount(int bucket) {
+    modifyBucket(bucket, true);
   }
 
   // just for testing
