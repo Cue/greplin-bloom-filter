@@ -95,7 +95,8 @@ class BloomMetadata {
 
   private static BloomMetadata readOldStyleHeader(RandomAccessFile file, int hashFns, int realSize)
       throws IOException {
-    return new BloomMetadata(file, (byte) 1, 2 * INT_SIZE, realSize, hashFns, BucketSize.FOUR);
+    assert realSize % BITS_IN_BYTE == 0;
+    return new BloomMetadata(file, (byte) 1, 2 * INT_SIZE, realSize/BITS_IN_BYTE, hashFns, BucketSize.FOUR);
   }
 
   private static BloomMetadata readNewStyleHeader(RandomAccessFile buffer) throws IOException {
@@ -171,7 +172,7 @@ class BloomMetadata {
     if (getVersion() == 1) {
       assert getHeaderLength() == 2 * INT_SIZE;
       file.writeInt(getHashFns());
-      file.writeInt(getTotalLength());
+      file.writeInt(getTotalLength()/BITS_IN_BYTE);
     } else {
       assert getVersion() == VERSION;
       file.writeInt(0);                         // 4 bytes
