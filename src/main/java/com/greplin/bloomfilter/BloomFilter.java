@@ -16,6 +16,9 @@
 
 package com.greplin.bloomfilter;
 
+import com.greplin.bloomfilter.allocator.Allocator;
+import com.greplin.bloomfilter.allocator.CloseCallback;
+
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
@@ -36,8 +39,20 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 public class BloomFilter implements Closeable {
 
   private static final int BITS_IN_BYTE = 8;
-  private static final int DEFAULT_SEEK_THRESHOLD = 20; // See the TestFileIO class for details on how this was decided
-  private static final BucketSize DEFAULT_BUCKET_SIZE = BucketSize.FOUR;
+  public static final int DEFAULT_SEEK_THRESHOLD = 20; // See the TestFileIO class for details on how this was decided
+  public static final BucketSize DEFAULT_BUCKET_SIZE = BucketSize.FOUR;
+  public static final Allocator DEFAULT_ALLOCATOR = new Allocator() {
+    @Override
+    public byte[] apply(int size) {
+      return new byte[size];
+    }
+  };
+  public static final CloseCallback DEFAULT_CLOSE_CALLBACK = new CloseCallback() {
+    @Override
+    public void close(byte[] cache) {
+      // nothing to do by default
+    }
+  };
 
   private final RandomAccessFile file;
   private byte[] cache = null;
@@ -60,7 +75,8 @@ public class BloomFilter implements Closeable {
   private final int seekThreshold;
 
   private final RepeatedMurmurHash hash;
-  private BloomMetadata metadata;
+  private final BloomMetadata metadata;
+  private final CloseCallback closeCallback;
 
 
   /**
@@ -71,40 +87,114 @@ public class BloomFilter implements Closeable {
    * @throws IOException if an I/O error is encountered
    */
   public static BloomFilter openExisting(File f) throws IOException {
-    return openExisting(f, DEFAULT_SEEK_THRESHOLD);
+    return new OpenBuilder(f).build();
   }
 
-  public static BloomFilter openExisting(File f, int seekThreshold) throws IOException {
-    return new BloomFilter(f, seekThreshold);
+  /**
+   * Builder pattern for opening an existing Bloom Filter
+   */
+  public static class OpenBuilder {
+    // required parameters
+    private final File f;
+
+    // optional parameters - initialize to reasonable defaults
+    private int seekThreshold = DEFAULT_SEEK_THRESHOLD;
+    private Allocator allocator = DEFAULT_ALLOCATOR;
+    private CloseCallback closeCallback = DEFAULT_CLOSE_CALLBACK;
+
+    public OpenBuilder(File f) {
+      this.f = f;
+    }
+
+    public OpenBuilder seekThreshold(int seekThreshold) {
+      this.seekThreshold = seekThreshold;
+      return this;
+    }
+
+    public OpenBuilder allocator(Allocator allocator) {
+      this.allocator = allocator;
+      return this;
+    }
+
+    public OpenBuilder closeCallback(CloseCallback closeCallback) {
+      this.closeCallback = closeCallback;
+      return this;
+    }
+
+    public BloomFilter build() throws IOException {
+      return new BloomFilter(f, seekThreshold, allocator, closeCallback);
+    }
   }
+
 
   /**
    * Create an optimal bloom filter for the given expected number of items and desired false positive rate.
    * Set force true to delete the file if it already exists.
    *
-   * @param f                 the file to write to
-   * @param numberOfItems     the number of expected items in the bloom filter
-   * @param falsePositiveRate allowable false positive rate when at capacity
-   * @param force             whether to allow overwriting the file. If force is false and the file already exists,
-   *                          will throw an IllegalArgumentException
-   * @return a bloom filter backed by the file
-   * @throws IOException if I/O errors are encountered
+   * @param f                 The file to write to (null if this should be in-memory only)
+   * @param numberOfItems     The expected number of items
+   * @param falsePositiveRate The desired false positive rate at the given number of items
+   * @return A bloom filter
+   * @throws IOException If I can't read/write the file specified
    */
   public static BloomFilter createOptimal(File f, int numberOfItems,
                                           double falsePositiveRate, boolean force)
       throws IOException {
-    return createOptimal(f, numberOfItems, falsePositiveRate, force, DEFAULT_SEEK_THRESHOLD, DEFAULT_BUCKET_SIZE);
+    return new NewBuilder(f, numberOfItems, falsePositiveRate).force(force).build();
   }
 
-  public static BloomFilter createOptimal(File f, int numberOfItems,
-                                          double falsePositiveRate, boolean force,
-                                          int seekThreshold,
-                                          BucketSize countBits)
-      throws IOException {
-    int buckets = (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
-        / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
-    int hashFns = (int) Math.round(Math.log(2.0) * buckets / numberOfItems);
-    return new BloomFilter(f, buckets, hashFns, force, seekThreshold, countBits);
+  public static class NewBuilder {
+
+    // required parameters
+    final File f;
+    private final int numberOfItems;
+    private final double falsePositiveRate;
+
+    // optional parameters
+    private boolean force = false;
+    private BucketSize bucketSize = DEFAULT_BUCKET_SIZE;
+    private int seekThreshold = DEFAULT_SEEK_THRESHOLD;
+    private Allocator allocator = DEFAULT_ALLOCATOR;
+    private CloseCallback closeCallback = DEFAULT_CLOSE_CALLBACK;
+
+    public NewBuilder force(boolean force) {
+      this.force = force;
+      return this;
+    }
+
+    public NewBuilder bucketSize(BucketSize bucketSize) {
+      this.bucketSize = bucketSize;
+      return this;
+    }
+
+    public NewBuilder seekThreshold(int seekThreshold) {
+      this.seekThreshold = seekThreshold;
+      return this;
+    }
+
+    public NewBuilder allocator(Allocator allocator) {
+      this.allocator = allocator;
+      return this;
+    }
+
+    public NewBuilder closeCallback(CloseCallback closeCallback) {
+      this.closeCallback = closeCallback;
+      return this;
+    }
+
+    public NewBuilder(File f, int numberOfItems, double falsePositiveRate) {
+      this.f = f;
+      this.numberOfItems = numberOfItems;
+      this.falsePositiveRate = falsePositiveRate;
+    }
+
+    public BloomFilter build() throws IOException {
+      int buckets = (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
+          / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
+      int hashFns = (int) Math.round(Math.log(2.0) * buckets / numberOfItems);
+
+      return new BloomFilter(f, buckets, hashFns, force, seekThreshold, bucketSize, allocator, closeCallback);
+    }
   }
 
   /**
@@ -238,6 +328,7 @@ public class BloomFilter implements Closeable {
     } finally {
       cacheLock.writeLock().unlock();
     }
+    closeCallback.close(cache);
   }
 
   public int capacity(double falsePositiveRate) {
@@ -253,24 +344,17 @@ public class BloomFilter implements Closeable {
     }
   }
 
-  /**
-   * Creates a new bloom filter in the given file.
-   *
-   * @param f             the file to write to. If null, the bloom filter is just created in RAM
-   * @param buckets          the number of bits to use
-   * @param hashFns       the number of hash functions
-   * @param force         whether to allow overwriting an existing file
-   * @param seekThreshold How many changes we should take before just rewriting the whole file on flush
-   * @throws IOException if an I/O error occurs
-   */
-  private BloomFilter(File f, int buckets, int hashFns, boolean force, int seekThreshold, BucketSize countBits)
+  // creates a new BloomFilter - access via BloomFilter.createOptimal(...)
+  private BloomFilter(File f, int buckets, int hashFns, boolean force, int seekThreshold, BucketSize countBits,
+                      Allocator cacheAllocator, CloseCallback callback)
       throws IOException {
+    this.closeCallback = callback;
     this.seekThreshold = seekThreshold;
     this.metadata = BloomMetadata.createNew(buckets, hashFns, countBits);
     hash = new RepeatedMurmurHash(hashFns, this.metadata.getBucketCount());
 
     // creating a new filter - so I can just be lazy and start it zero'd
-    cache = new byte[this.metadata.getTotalLength() - this.metadata.getHeaderLength()];
+    cache = cacheAllocator.apply(this.metadata.getTotalLength() - this.metadata.getHeaderLength());
     cacheDirty = true;
 
     open = true;
@@ -303,23 +387,19 @@ public class BloomFilter implements Closeable {
 
   }
 
-  /**
-   * Opens an existing bloom filter.  Access via BloomFilter.openExisting(...)
-   *
-   * @param f             the file to open
-   * @param seekThreshold How many changes we should take before just rewriting the whole file on flush
-   * @throws IOException if I/O errors are encountered
-   */
-  private BloomFilter(File f, int seekThreshold) throws IOException {
+  // Opens an existing bloom filter.  Access via BloomFilter.openExisting(...)
+  private BloomFilter(File f, int seekThreshold, Allocator cacheAllocator, CloseCallback closeCallback)
+      throws IOException {
     assert f.exists() && f.isFile() && f.canRead() && f.canWrite() : "Trying to open a non-existent bloom filter";
     this.seekThreshold = seekThreshold;
-
+    this.closeCallback = closeCallback;
+    
     file = new RandomAccessFile(f, "rw");
     this.metadata = BloomMetadata.readHeader(file);
     unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
 
     // load the cache with the on disk data
-    cache = new byte[metadata.getTotalLength() - metadata.getHeaderLength()];
+    cache = cacheAllocator.apply(metadata.getTotalLength() - metadata.getHeaderLength());
     int readRes = file.read(cache);
     assert readRes == (metadata.getTotalLength() - metadata.getHeaderLength())
         : "I only read " + readRes + " bytes, but was expecting " + (metadata.getTotalLength()
@@ -447,7 +527,8 @@ public class BloomFilter implements Closeable {
    * Decrements the count in a given bucket
    *
    * @param bucket - which bucket to increment
-   */  private void decrementCount(int bucket) {
+   */
+  private void decrementCount(int bucket) {
     modifyBucket(bucket, true);
   }
 
