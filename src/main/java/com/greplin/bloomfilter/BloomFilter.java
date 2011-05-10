@@ -322,7 +322,6 @@ public class BloomFilter implements Closeable {
         if (file != null) {
           file.close();
         }
-        cache = null;
         open = false;
       }
     } finally {
