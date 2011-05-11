@@ -189,12 +189,19 @@ public class BloomFilter implements Closeable {
     }
 
     public BloomFilter build() throws IOException {
-      int buckets = (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
-          / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
-      int hashFns = (int) Math.round(Math.log(2.0) * buckets / numberOfItems);
-
+      int buckets = calculateOptimalBucketCount(numberOfItems, falsePositiveRate);
+      int hashFns = calculateOptimalHashFunctionCount(numberOfItems, buckets);
       return new BloomFilter(f, buckets, hashFns, force, seekThreshold, bucketSize, allocator, closeCallback);
     }
+  }
+
+  public static int calculateOptimalBucketCount(int numberOfItems, double falsePositiveRate) {
+    return (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
+        / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
+  }
+
+  public static int calculateOptimalHashFunctionCount(int numberOfItems, int buckets) {
+    return (int) Math.round(Math.log(2.0) * buckets / numberOfItems);
   }
 
   /**
@@ -392,7 +399,7 @@ public class BloomFilter implements Closeable {
     assert f.exists() && f.isFile() && f.canRead() && f.canWrite() : "Trying to open a non-existent bloom filter";
     this.seekThreshold = seekThreshold;
     this.closeCallback = closeCallback;
-    
+
     file = new RandomAccessFile(f, "rw");
     this.metadata = BloomMetadata.readHeader(file);
     unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
