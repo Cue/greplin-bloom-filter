@@ -211,7 +211,9 @@ public class BloomFilter implements Closeable {
     cacheLock.writeLock().lock();
     try {
       checkIfOpen();
-      cache = new byte[this.metadata.getTotalLength() - this.metadata.getHeaderLength()];
+      for(int i = 0; i < cache.length; i++) {
+        cache[i] = 0;
+      }
       cacheDirty = true;
     } finally {
       cacheLock.writeLock().unlock();
