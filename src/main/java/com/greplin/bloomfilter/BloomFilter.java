@@ -393,6 +393,7 @@ public class BloomFilter implements Closeable {
       file = null;
     }
 
+    flush();
   }
 
   // Opens an existing bloom filter.  Access via BloomFilter.openExisting(...)
