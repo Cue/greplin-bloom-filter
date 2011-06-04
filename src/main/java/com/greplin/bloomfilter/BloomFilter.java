@@ -211,7 +211,7 @@ public class BloomFilter implements Closeable {
     cacheLock.writeLock().lock();
     try {
       checkIfOpen();
-      for(int i = 0; i < cache.length; i++) {
+      for (int i = 0; i < cache.length; i++) {
         cache[i] = 0;
       }
       cacheDirty = true;
@@ -291,23 +291,36 @@ public class BloomFilter implements Closeable {
    * @throws IOException if I/O errors are encountered.
    */
   public void flush() throws IOException {
+    flush(false);
+  }
+
+
+  private void flush(boolean forClose) throws IOException {
     cacheLock.writeLock().lock();
     try {
-      checkIfOpen();
       if (cacheDirty && unflushedChanges != null && file != null) {
         final int offset = this.metadata.getHeaderLength();
 
         //it's actually a disk-backed filter with changes
         if (unflushedChangeCounter.get() >= seekThreshold) {
           file.seek(offset);
-          file.write(cache); // can probably be made more efficient
-          file.getFD().sync();
+          file.write(cache);
+          if (forClose) {
+            closeCallback.close(cache);
+            cache = null;
+          }
         } else {
           for (Map.Entry<Integer, Byte> change : unflushedChanges.entrySet()) {
+            if (forClose) { // minor optimization, to clear the memory for the cache before the disk I/O
+              closeCallback.close(cache);
+              cache = null;
+            }
             file.seek(change.getKey() + offset);
             file.write(change.getValue());
           }
         }
+
+        file.getFD().sync();
         cacheDirty = false;
         unflushedChanges.clear();
         unflushedChangeCounter.set(0);
@@ -316,7 +329,6 @@ public class BloomFilter implements Closeable {
       cacheLock.writeLock().unlock();
     }
   }
-
 
   /**
    * Closes the bloom filter.
@@ -327,16 +339,30 @@ public class BloomFilter implements Closeable {
     cacheLock.writeLock().lock();
     try {
       if (open) {
-        flush();
+        open = false;
+        flush(true);
         if (file != null) {
           file.close();
         }
-        open = false;
       }
     } finally {
       cacheLock.writeLock().unlock();
     }
-    closeCallback.close(cache);
+  }
+
+
+  /**
+   * Does this bloom filter have changes which haven't been sync'd to disk?
+   *
+   * @return True IFF there are unflushed changes
+   */
+  public boolean unflushedChanges() {
+    cacheLock.readLock().lock();
+    try {
+      return cacheDirty;
+    } finally {
+      cacheLock.readLock().unlock();
+    }
   }
 
   public int capacity(double falsePositiveRate) {
@@ -402,7 +428,6 @@ public class BloomFilter implements Closeable {
     assert f.exists() && f.isFile() && f.canRead() && f.canWrite() : "Trying to open a non-existent bloom filter";
     this.seekThreshold = seekThreshold;
     this.closeCallback = closeCallback;
-
     file = new RandomAccessFile(f, "rw");
     this.metadata = BloomMetadata.readHeader(file);
     unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
