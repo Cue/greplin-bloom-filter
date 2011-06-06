@@ -311,12 +311,12 @@ public class BloomFilter implements Closeable {
           }
         } else {
           for (Map.Entry<Integer, Byte> change : unflushedChanges.entrySet()) {
-            if (forClose) { // minor optimization, to clear the memory for the cache before the disk I/O
-              closeCallback.close(cache);
-              cache = null;
-            }
             file.seek(change.getKey() + offset);
             file.write(change.getValue());
+          }
+          if (forClose) { // minor optimization, to clear the memory for the cache before the disk I/O
+            closeCallback.close(cache);
+            cache = null;
           }
         }
 

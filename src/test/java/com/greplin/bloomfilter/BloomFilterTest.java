@@ -16,6 +16,7 @@
 
 package com.greplin.bloomfilter;
 
+import com.greplin.bloomfilter.allocator.CloseCallback;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -23,6 +24,8 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Basic sanity checks on the bloom filter
@@ -359,6 +362,27 @@ public class BloomFilterTest {
     Assert.assertEquals("01101001", printBits(BloomFilter.putBucketAt(orig, 5, 1, (byte) 0)));
     Assert.assertEquals("01101111", printBits(BloomFilter.putBucketAt(orig, 6, 1, (byte) 1)));
     Assert.assertEquals("01101100", printBits(BloomFilter.putBucketAt(orig, 7, 1, (byte) 0)));
+  }
+
+  @Test
+  public void testCloseCallback() throws IOException {
+    final AtomicInteger closeCallbackCalled = new AtomicInteger(0);
+    final long buckets = BloomFilter.calculateOptimalBucketCount(1000,  0.00001);
+    BloomFilter bf = new BloomFilter.NewBuilder(TEMP_FILE, 1000, 0.00001)
+        .force(true)
+        .bucketSize(BucketSize.FOUR)
+        .closeCallback(new CloseCallback() {
+          @Override
+          public void close(byte[] cache) {
+            Assert.assertNotNull(cache);
+            Assert.assertEquals((int)Math.ceil((double)buckets/2.0), cache.length);
+            closeCallbackCalled.incrementAndGet();
+          }
+        }).build();
+    bf.add("Hello World".getBytes());
+    Assert.assertTrue(bf.contains("Hello World".getBytes()));
+    bf.close();
+    Assert.assertEquals(1, closeCallbackCalled.get());
   }
 
   private static String printBits(byte x) {
