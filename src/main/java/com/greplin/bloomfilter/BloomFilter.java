@@ -566,8 +566,12 @@ public class BloomFilter implements Closeable {
     modifyBucket(bucket, true);
   }
 
-  // just for testing
-  protected byte[] getUnderlyingDataBytes() {
+
+  /**
+   * Returns the underlying byte array. Useful for testing and equivalency checking.
+   * @return cache - the underlying byte array
+   */
+  public byte[] getUnderlyingDataBytes() {
     checkIfOpen();
     return cache;
   }
