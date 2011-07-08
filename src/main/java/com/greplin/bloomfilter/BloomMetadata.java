@@ -59,6 +59,7 @@ class BloomMetadata {
   private final int bucketsPerByte;
   private final int bucketCount;
 
+
   public static BloomMetadata readHeader(RandomAccessFile buffer) throws IOException {
     final int firstInt = buffer.readInt();
     final int secondInt = buffer.readInt();
@@ -70,11 +71,19 @@ class BloomMetadata {
     }
   }
 
+
   public static BloomMetadata createNew(final int buckets, final int hashFns, final BucketSize countBits)
       throws IOException {
     return new BloomMetadata(null, VERSION, EXPECTED_HEADER_BYTES,
         EXPECTED_HEADER_BYTES + bytes(buckets * countBits.getBits()), hashFns, countBits);
   }
+
+
+  public static BloomMetadata createNewWithLength(final int totalLength, final int hashFns, final BucketSize countBits)
+      throws IOException {
+    return new BloomMetadata(null, VERSION, EXPECTED_HEADER_BYTES, totalLength, hashFns, countBits);
+  }
+
 
   private BloomMetadata(RandomAccessFile file,
                         byte version, int headerLength, int totalLength, int hashFns, BucketSize bucketSize)
@@ -101,14 +110,17 @@ class BloomMetadata {
     }
   }
 
+
   private static int bytes(int bits) {
     return bits / BITS_IN_BYTE + (bits % BITS_IN_BYTE == 0 ? 0 : 1);
   }
+
 
   private static BloomMetadata readOldStyleHeader(RandomAccessFile file, int hashFns, int realSize)
       throws IOException {
     return new BloomMetadata(file, (byte) 1, 2 * INT_SIZE, bytes(realSize), hashFns, BucketSize.FOUR);
   }
+
 
   private static BloomMetadata readNewStyleHeader(RandomAccessFile buffer) throws IOException {
 
@@ -147,43 +159,52 @@ class BloomMetadata {
     return new BloomMetadata(buffer, version, headerLen, realSize, hashFns, bucketSize);
   }
 
+
   public byte getVersion() {
     return version;
   }
+
 
   public int getHeaderLength() {
     return headerLength;
   }
 
+
   public int getTotalLength() {
     return totalLength;
   }
+
 
   public int getHashFns() {
     return hashFns;
   }
 
+
   public BucketSize getBucketSize() {
     return bucketSize;
   }
+
 
   public int getMaxCountInBucket() {
     return maxCountInBucket;
   }
 
+
   public int getBucketsPerByte() {
     return bucketsPerByte;
   }
+
 
   public int getBucketCount() {
     return bucketCount;
   }
 
+
   public void writeToFile(RandomAccessFile file) throws IOException {
     if (getVersion() == 1) {
       assert getHeaderLength() == 2 * INT_SIZE;
       file.writeInt(getHashFns());
-      file.writeInt(getTotalLength()/BITS_IN_BYTE);
+      file.writeInt(getTotalLength() / BITS_IN_BYTE);
     } else {
       assert getVersion() == VERSION;
       file.writeInt(0);                         // 4 bytes

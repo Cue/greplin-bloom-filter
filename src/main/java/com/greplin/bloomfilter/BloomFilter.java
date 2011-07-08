@@ -90,6 +90,7 @@ public class BloomFilter implements Closeable {
     return new OpenBuilder(f).build();
   }
 
+
   /**
    * Builder pattern for opening an existing Bloom Filter
    */
@@ -102,24 +103,29 @@ public class BloomFilter implements Closeable {
     private Allocator allocator = DEFAULT_ALLOCATOR;
     private CloseCallback closeCallback = DEFAULT_CLOSE_CALLBACK;
 
+
     public OpenBuilder(File f) {
       this.f = f;
     }
+
 
     public OpenBuilder seekThreshold(int seekThreshold) {
       this.seekThreshold = seekThreshold;
       return this;
     }
 
+
     public OpenBuilder allocator(Allocator allocator) {
       this.allocator = allocator;
       return this;
     }
 
+
     public OpenBuilder closeCallback(CloseCallback closeCallback) {
       this.closeCallback = closeCallback;
       return this;
     }
+
 
     public BloomFilter build() throws IOException {
       return new BloomFilter(f, seekThreshold, allocator, closeCallback);
@@ -143,11 +149,14 @@ public class BloomFilter implements Closeable {
     return new NewBuilder(f, numberOfItems, falsePositiveRate).force(force).build();
   }
 
+
   public static class NewBuilder {
 
     // required parameters
     final File f;
     private final int numberOfItems;
+    private final int totalLength;
+    private final int hashFns;
     private final double falsePositiveRate;
 
     // optional parameters
@@ -157,52 +166,94 @@ public class BloomFilter implements Closeable {
     private Allocator allocator = DEFAULT_ALLOCATOR;
     private CloseCallback closeCallback = DEFAULT_CLOSE_CALLBACK;
 
+
     public NewBuilder force(boolean force) {
       this.force = force;
       return this;
     }
+
 
     public NewBuilder bucketSize(BucketSize bucketSize) {
       this.bucketSize = bucketSize;
       return this;
     }
 
+
     public NewBuilder seekThreshold(int seekThreshold) {
       this.seekThreshold = seekThreshold;
       return this;
     }
+
 
     public NewBuilder allocator(Allocator allocator) {
       this.allocator = allocator;
       return this;
     }
 
+
     public NewBuilder closeCallback(CloseCallback closeCallback) {
       this.closeCallback = closeCallback;
       return this;
     }
 
+
+    /**
+     * Default constructor.
+     *
+     * @param f                 The file to save the bloom filter into
+     * @param numberOfItems     The expected number of items
+     * @param falsePositiveRate The acceptable false positive rate
+     */
     public NewBuilder(File f, int numberOfItems, double falsePositiveRate) {
       this.f = f;
       this.numberOfItems = numberOfItems;
+      this.totalLength = 0;
+      this.hashFns = 0;
       this.falsePositiveRate = falsePositiveRate;
     }
 
+
+    /**
+     * This constructor allows a BloomFilter to be built exact specifications for its size and number of hash functions.
+     *
+     * @param f                 The file to save the bloom filter into
+     * @param numberOfItems     The expected number of items
+     * @param falsePositiveRate The acceptable false positive rate
+     * @param totalLength       The size of the underlying byte array in bytes
+     * @param hashFns           The number of hash functions the bloom filter should use
+     */
+    public NewBuilder(File f, int numberOfItems, double falsePositiveRate, int totalLength, int hashFns) {
+      this.f = f;
+      this.numberOfItems = numberOfItems;
+      this.totalLength = totalLength;
+      this.hashFns = hashFns;
+      this.falsePositiveRate = falsePositiveRate;
+    }
+
+
     public BloomFilter build() throws IOException {
-      int buckets = calculateOptimalBucketCount(numberOfItems, falsePositiveRate);
-      int hashFns = calculateOptimalHashFunctionCount(numberOfItems, buckets);
-      return new BloomFilter(f, buckets, hashFns, force, seekThreshold, bucketSize, allocator, closeCallback);
+      if (this.totalLength == 0) {
+        int buckets = calculateOptimalBucketCount(numberOfItems, falsePositiveRate);
+        int hashFns = calculateOptimalHashFunctionCount(numberOfItems, buckets);
+        return new BloomFilter(f, buckets, hashFns, force, seekThreshold, bucketSize, allocator, closeCallback);
+      } else {
+        return new BloomFilter(f, force, seekThreshold, allocator, closeCallback,
+            BloomMetadata.createNewWithLength(totalLength, hashFns, bucketSize));
+      }
     }
   }
+
 
   public static int calculateOptimalBucketCount(int numberOfItems, double falsePositiveRate) {
     return (int) Math.ceil((numberOfItems * Math.log(falsePositiveRate))
         / Math.log(1.0 / (Math.pow(2.0, Math.log(2.0)))));
   }
 
+
   public static int calculateOptimalHashFunctionCount(int numberOfItems, int buckets) {
     return (int) Math.round(Math.log(2.0) * buckets / numberOfItems);
   }
+
 
   /**
    * Clears all elements from a bloom filter.
@@ -330,6 +381,7 @@ public class BloomFilter implements Closeable {
     }
   }
 
+
   /**
    * Closes the bloom filter.
    *
@@ -365,6 +417,7 @@ public class BloomFilter implements Closeable {
     }
   }
 
+
   public int capacity(double falsePositiveRate) {
     int capacity = (int) Math.round((this.metadata.getBucketCount() * Math.log(1.0 / Math.pow(2.0, Math.log(2.0))))
         / Math.log(falsePositiveRate));
@@ -378,14 +431,22 @@ public class BloomFilter implements Closeable {
     }
   }
 
+
   // creates a new BloomFilter - access via BloomFilter.createOptimal(...)
   private BloomFilter(File f, int buckets, int hashFns, boolean force, int seekThreshold, BucketSize countBits,
                       Allocator cacheAllocator, CloseCallback callback)
       throws IOException {
+    this(f, force, seekThreshold, cacheAllocator, callback, BloomMetadata.createNew(buckets, hashFns, countBits));
+  }
+
+
+  private BloomFilter(File f, boolean force, int seekThreshold,
+                      Allocator cacheAllocator, CloseCallback callback, BloomMetadata metadata)
+      throws IOException {
+    this.metadata = metadata;
     this.closeCallback = callback;
     this.seekThreshold = seekThreshold;
-    this.metadata = BloomMetadata.createNew(buckets, hashFns, countBits);
-    hash = new RepeatedMurmurHash(hashFns, this.metadata.getBucketCount());
+    hash = new RepeatedMurmurHash(this.metadata.getHashFns(), this.metadata.getBucketCount());
 
     // creating a new filter - so I can just be lazy and start it zero'd
     cache = cacheAllocator.apply(this.metadata.getTotalLength() - this.metadata.getHeaderLength());
@@ -421,6 +482,7 @@ public class BloomFilter implements Closeable {
 
     flush();
   }
+
 
   // Opens an existing bloom filter.  Access via BloomFilter.openExisting(...)
   private BloomFilter(File f, int seekThreshold, Allocator cacheAllocator, CloseCallback closeCallback)
@@ -474,6 +536,7 @@ public class BloomFilter implements Closeable {
     return data;
   }
 
+
   protected static byte putBucketAt(final byte wholeByte, int offset, int len, byte bucketVal) {
     assert offset < BITS_IN_BYTE;
     assert len <= BITS_IN_BYTE;
@@ -515,6 +578,7 @@ public class BloomFilter implements Closeable {
 
     return bucketVal != 0;
   }
+
 
   // if decr is false, then it's an incr
   private void modifyBucket(int position, boolean decr) {
@@ -569,10 +633,31 @@ public class BloomFilter implements Closeable {
 
   /**
    * Returns the underlying byte array. Useful for testing and equivalency checking.
+   *
    * @return cache - the underlying byte array
    */
   public byte[] getUnderlyingDataBytes() {
     checkIfOpen();
     return cache;
+  }
+
+
+  /**
+   * Returns the length of the underlying bloom filter byte array.
+   *
+   * @return the length of the bloom filter byte array
+   */
+  public int getTotalLength() {
+    return this.metadata.getTotalLength();
+  }
+
+
+  /**
+   * Returns the number of hash functions this BloomFilter uses.
+   *
+   * @return the number of hash functions
+   */
+  public int getHashFns() {
+    return this.metadata.getHashFns();
   }
 }
