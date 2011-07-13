@@ -646,6 +646,8 @@ public class BloomFilter implements Closeable {
         this.unflushedChanges.clear();
       }
 
+      this.open = true;
+
       if (f.length() != this.metadata.getTotalLength()) {
         throw new RuntimeException("Bad size - expected " + this.metadata.getTotalLength() + " but got " + f.length());
       }
