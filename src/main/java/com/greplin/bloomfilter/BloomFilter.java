@@ -54,7 +54,7 @@ public class BloomFilter implements Closeable {
     }
   };
 
-  private final RandomAccessFile file;
+  private RandomAccessFile file;
   private byte[] cache = null;
 
   // Note: unflushedChanges is always implemented as a ConcurrentSkipListMap for a few reasons
@@ -62,7 +62,7 @@ public class BloomFilter implements Closeable {
   // Second, because it's always small (elements<SEEK_THRESHOLD) the O(log(N)) operations aren't a big deal,
   // and are almost always outweighed by benefits of being lock-free.
   // One caveat is that the size() method is O(n) time, so we keep an independent size counter.
-  private final Map<Integer, Byte> unflushedChanges;
+  private Map<Integer, Byte> unflushedChanges;
   private final AtomicInteger unflushedChangeCounter = new AtomicInteger(0);
 
   private volatile boolean cacheDirty;
@@ -608,6 +608,48 @@ public class BloomFilter implements Closeable {
     byte newVal =
         putBucketAt(byteContainingBucket, offsetOfBucketInByte, this.metadata.getBucketSize().getBits(), (byte) newBucketVal);
     setByte(indexOfByteContainingBucket, newVal);
+  }
+
+
+  /**
+   * Closes this BloomFilter and sets its file to the given File instead. If the given file already exists and
+   * force is true, deletes the existing file first.
+   *
+   * @param f     The file to save this BloomFilter to on disk
+   * @param force If true, forces the existing file for this BloomFilter to be deleted
+   * @throws IOException If a problem occurs deleting the old file or creating the new one
+   */
+  public void setNewFile(File f, boolean force) throws IOException {
+
+    close();
+
+    if (f != null) {
+      if (f.exists()) {
+        if (force) {
+          if (!f.delete()) {
+            throw new IOException("Couldn't delete old file at " + f.getAbsolutePath());
+          }
+        } else {
+          throw new IllegalArgumentException("Can't create a new BloomFilter at " + f.getAbsolutePath()
+              + " since it already exists");
+        }
+      }
+
+      this.file = new RandomAccessFile(f, "rw");
+      this.metadata.writeToFile(this.file);
+      this.file.setLength(this.metadata.getTotalLength());
+      this.file.getFD().sync();
+
+      if (this.unflushedChanges == null) {
+        unflushedChanges = new ConcurrentSkipListMap<Integer, Byte>();
+      } else {
+        this.unflushedChanges.clear();
+      }
+
+      if (f.length() != this.metadata.getTotalLength()) {
+        throw new RuntimeException("Bad size - expected " + this.metadata.getTotalLength() + " but got " + f.length());
+      }
+    }
   }
 
 
