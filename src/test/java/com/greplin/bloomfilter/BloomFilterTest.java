@@ -43,6 +43,7 @@ public class BloomFilterTest {
 
   private static final File TEMP_FILE;
 
+
   static {
     try {
       TEMP_FILE = File.createTempFile("greplin-bloom", "test");
@@ -50,6 +51,7 @@ public class BloomFilterTest {
       throw new RuntimeException("Unable to create new temp file", e);
     }
   }
+
 
   @Test
   public void testClear() throws IOException {
@@ -62,6 +64,7 @@ public class BloomFilterTest {
     Assert.assertFalse(bf.contains("hello".getBytes()));
     Assert.assertFalse(bf.contains("goodbye".getBytes()));
   }
+
 
   @Test
   public void testBasic() throws IOException {
@@ -80,6 +83,7 @@ public class BloomFilterTest {
       Assert.assertTrue(bf.contains(s.getBytes()));
     }
   }
+
 
   @Test
   public void testOpenClose() throws IOException {
@@ -118,6 +122,53 @@ public class BloomFilterTest {
     bf.close();
   }
 
+
+  @Test
+  public void testSetNewFile() throws IOException {
+    BloomFilter bf1 = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true);
+    BloomFilter bf2 = BloomFilter.createOptimal(null, 1000, 0.00001, true);
+
+    for (String s : IN) {
+      bf1.add(s.getBytes());
+      bf2.add(s.getBytes());
+      Assert.assertTrue(bf1.contains(s.getBytes()));
+    }
+
+    for (String s : OUT) {
+      Assert.assertFalse(bf1.contains(s.getBytes()));
+    }
+
+    for (String s : IN) {
+      Assert.assertTrue(bf1.contains(s.getBytes()));
+    }
+
+    byte[] exactData = bf1.getUnderlyingDataBytes();
+    bf2.setNewFile(TEMP_FILE, true);
+
+    for (String s : OUT) {
+      Assert.assertFalse(bf2.contains(s.getBytes()));
+    }
+
+    for (String s : IN) {
+      Assert.assertTrue(bf2.contains(s.getBytes()));
+    }
+
+    bf2.setNewFile(TEMP_FILE, true);
+
+    for (String s : OUT) {
+      Assert.assertFalse(bf2.contains(s.getBytes()));
+    }
+
+    for (String s : IN) {
+      Assert.assertTrue(bf2.contains(s.getBytes()));
+    }
+
+    Assert.assertArrayEquals(exactData, bf2.getUnderlyingDataBytes());
+    bf1.close();
+    bf2.close();
+  }
+
+
   @Test
   public void testMetadataOverwrite() throws IOException {
     // Ensures that metadata cannot be overwritten by hash data.
@@ -134,6 +185,7 @@ public class BloomFilterTest {
 
     Assert.assertTrue(bf.contains("".getBytes()));
   }
+
 
   @Test
   public void testSerialize() throws IOException {
@@ -161,6 +213,7 @@ public class BloomFilterTest {
       Assert.assertFalse(bf.contains(s.getBytes()));
     }
   }
+
 
   @Test
   public void testSeekThreshold() throws IOException {
@@ -192,6 +245,7 @@ public class BloomFilterTest {
       }
     }
   }
+
 
   @Test
   public void testBrokenGetBucket() throws IOException {
@@ -231,6 +285,7 @@ public class BloomFilterTest {
     BloomFilter bf = BloomFilter.createOptimal(TEMP_FILE, 1000, 0.00001, true);
     Assert.assertEquals(1000, bf.capacity(0.00001));
   }
+
 
   @Test
   public void testRemove() throws IOException {
@@ -340,6 +395,7 @@ public class BloomFilterTest {
     Assert.assertEquals(1, BloomFilter.getBucketAt(orig, 7, 1));
   }
 
+
   @Test
   public void testPutBucket() throws IOException {
     final byte orig = 109; // 01101101
@@ -364,10 +420,11 @@ public class BloomFilterTest {
     Assert.assertEquals("01101100", printBits(BloomFilter.putBucketAt(orig, 7, 1, (byte) 0)));
   }
 
+
   @Test
   public void testCloseCallback() throws IOException {
     final AtomicInteger closeCallbackCalled = new AtomicInteger(0);
-    final long buckets = BloomFilter.calculateOptimalBucketCount(1000,  0.00001);
+    final long buckets = BloomFilter.calculateOptimalBucketCount(1000, 0.00001);
     BloomFilter bf = new BloomFilter.NewBuilder(TEMP_FILE, 1000, 0.00001)
         .force(true)
         .bucketSize(BucketSize.FOUR)
@@ -375,7 +432,7 @@ public class BloomFilterTest {
           @Override
           public void close(byte[] cache) {
             Assert.assertNotNull(cache);
-            Assert.assertEquals((int)Math.ceil((double)buckets/2.0), cache.length);
+            Assert.assertEquals((int) Math.ceil((double) buckets / 2.0), cache.length);
             closeCallbackCalled.incrementAndGet();
           }
         }).build();
@@ -385,10 +442,12 @@ public class BloomFilterTest {
     Assert.assertEquals(1, closeCallbackCalled.get());
   }
 
+
   private static String printBits(byte x) {
     String s = Integer.toBinaryString(x & 0xff);
     return repeat(8 - s.length(), '0') + s;
   }
+
 
   private static String repeat(int count, char x) {
     String res = "";

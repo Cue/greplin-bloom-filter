@@ -620,9 +620,6 @@ public class BloomFilter implements Closeable {
    * @throws IOException If a problem occurs deleting the old file or creating the new one
    */
   public void setNewFile(File f, boolean force) throws IOException {
-
-    close();
-
     if (f != null) {
       if (f.exists()) {
         if (force) {
@@ -651,6 +648,8 @@ public class BloomFilter implements Closeable {
       if (f.length() != this.metadata.getTotalLength()) {
         throw new RuntimeException("Bad size - expected " + this.metadata.getTotalLength() + " but got " + f.length());
       }
+
+      flush();
     }
   }
 
