@@ -104,29 +104,71 @@ public class BloomFilter implements Closeable {
     private CloseCallback closeCallback = DEFAULT_CLOSE_CALLBACK;
 
 
+    /**
+     * Uses a builder-pattern to open an existing (on-disk) bloom filter.
+     *
+     * @param f The file the bloomfilter was persisted to.
+     */
     public OpenBuilder(File f) {
       this.f = f;
     }
 
 
+    /**
+     * The bloom filter is stored, on disk, as a large binary file. To flush changes to disk, we have two
+     * options:
+     * A. We could rewrite the entire file to disk as one sequential write.
+     * B. We could seek to specific offsets of bytes that have changed in a file, and just modify those
+     * <p/>
+     * If the number of bytes that we would have to change is greater than the seekThreshold, we will use
+     * strategy A. Otherwise, we will use strategy B.
+     * <p/>
+     * Set to '0' to always prefer strategy A, or Integer.MAX_INT to always use B.
+     * <p/>
+     * Default is 20.
+     *
+     * @param seekThreshold Number of seeks we'll accept before just rewriting the file
+     * @return The builder
+     */
     public OpenBuilder seekThreshold(int seekThreshold) {
       this.seekThreshold = seekThreshold;
       return this;
     }
 
 
+    /**
+     * If you're constantly opening/closing a lot of bloomfilters, using a pool/slab allocator for the byte arrays
+     * underlying the in-memory cache might make sense. It probably doesn't (the JVM is *really* good at memory
+     * managment). But, if you run into allocation/GC issues, it might be worth checking this out.
+     *
+     * @param allocator An allocator the bloomfilter will use to allocate the byte[] underlying the in-memory cache
+     * @return The builder
+     */
     public OpenBuilder allocator(Allocator allocator) {
       this.allocator = allocator;
       return this;
     }
 
 
+    /**
+     * When the bloom filter is closed, it will return the byte[] array underlying the in-memory cache to this function.
+     * It's the other piece you'll need (in addition to the 'Allocator') to implement a slab/pool allocator yourself.
+     *
+     * @param closeCallback A callback that will receive the BloomFilter's underlying byte[] when it is closed.
+     * @return The builder
+     */
     public OpenBuilder closeCallback(CloseCallback closeCallback) {
       this.closeCallback = closeCallback;
       return this;
     }
 
 
+    /**
+     * Open the on-disk bloom filter you specified in the constructor.
+     *
+     * @return A bloom filter
+     * @throws IOException If the bloomfilter file specified couldn't be read.
+     */
     public BloomFilter build() throws IOException {
       return new BloomFilter(f, seekThreshold, allocator, closeCallback);
     }
@@ -167,30 +209,87 @@ public class BloomFilter implements Closeable {
     private CloseCallback closeCallback = DEFAULT_CLOSE_CALLBACK;
 
 
+    /**
+     * Use this parameter to expose whether you want to over-write any existing file at the location you specified.
+     * <p/>
+     * If you want to open an existing BloomFilter, see the OpenBuilder. If force is set to false and a file exists
+     * at the location you specify, the build method will throw an IllegalArgumentException.
+     * <p/>
+     * Default is false (better safe than sorry).
+     *
+     * @param force Whether to over-write an existing file at the location you specified
+     * @return The builder
+     */
     public NewBuilder force(boolean force) {
       this.force = force;
       return this;
     }
 
 
+    /**
+     * Originally, bloom filters had '1-bit' bucket sizes. That made them very space efficient, but it was
+     * impossible to delete items.
+     * <p/>
+     * The larger the bucketSize, the more likely you can delete items as the bloomfilter gets more loaded
+     * - but the more space the filter will use on disk and in-memory. Using 2-bit buckets uses twice as
+     * much memory/disk as 1-bit buckets - and 8-bit buckets require 8x the memory/disk of 1-bit buckets.
+     * <p/>
+     * See http://portal.acm.org/citation.cfm?id=285287 for details.
+     * <p/>
+     * Default is BucketSize.FOUR
+     *
+     * @param bucketSize How many bits to use per bucket.
+     * @return The builder
+     */
     public NewBuilder bucketSize(BucketSize bucketSize) {
       this.bucketSize = bucketSize;
       return this;
     }
 
 
+    /**
+     * The bloom filter is stored, on disk, as a large binary file. To flush changes to disk, we have two
+     * options:
+     * A. We could rewrite the entire file to disk as one sequential write.
+     * B. We could seek to specific offsets of bytes that have changed in a file, and just modify those
+     * <p/>
+     * If the number of bytes that we would have to change is greater than the seekThreshold, we will use
+     * strategy A. Otherwise, we will use strategy B.
+     * <p/>
+     * Set to '0' to always prefer strategy A, or Integer.MAX_INT to always use B.
+     * <p/>
+     * Default is 20.
+     *
+     * @param seekThreshold Number of seeks we'll accept before just rewriting the file
+     * @return The builder
+     */
     public NewBuilder seekThreshold(int seekThreshold) {
       this.seekThreshold = seekThreshold;
       return this;
     }
 
 
+    /**
+     * If you're constantly opening/closing a lot of bloomfilters, using a pool/slab allocator for the byte arrays
+     * underlying the in-memory cache might make sense. It probably doesn't for you (the JVM is *really* good at memory
+     * managment). But, if you run into allocation/GC issues, it might be worth checking this out.
+     *
+     * @param allocator An allocator the bloomfilter will use to allocate the byte[] underlying the in-memory cache
+     * @return The builder
+     */
     public NewBuilder allocator(Allocator allocator) {
       this.allocator = allocator;
       return this;
     }
 
 
+    /**
+     * When the bloom filter is closed, it will return the byte[] array underlying the in-memory cache to this function.
+     * It's the other piece you'll need (in addition to the 'Allocator') to implement a slab/pool allocator yourself.
+     *
+     * @param closeCallback A callback that will receive the BloomFilter's underlying byte[] when it is closed.
+     * @return The builder
+     */
     public NewBuilder closeCallback(CloseCallback closeCallback) {
       this.closeCallback = closeCallback;
       return this;
@@ -230,7 +329,12 @@ public class BloomFilter implements Closeable {
       this.falsePositiveRate = falsePositiveRate;
     }
 
-
+    /**
+     * Use the settings provided, and build an actual bloom filter.
+     *
+     * @return
+     * @throws IOException
+     */
     public BloomFilter build() throws IOException {
       if (this.totalLength == 0) {
         int buckets = calculateOptimalBucketCount(numberOfItems, falsePositiveRate);

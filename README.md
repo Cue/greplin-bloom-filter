@@ -34,7 +34,9 @@ Some improvements we'd love to see include:
     mvn install
 
 ## Implementation details
-   
+
+* The NewBuilder and OpenBuilder expose a lot of (optionally) tunable knobs and hooks. Most users will never need to know about them though, and just supplying the required Builder constructor arguments will be fine.
+
 * This is a counting bloom filter that uses a configurable number of bits per bucket. If you use one bit per bucket, then items can never be deleted. If you use 8 bits per bucket, then it uses 8x more space than a non-counting filter, but items can be deleted as long as the count doesn't exceed 255 items in a bucket.
 
 * Instead of using N distinct hashes, we use linear combinations of two runs of a repeated murmur hash per [Kirch and Mitzenmacher] (http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf).
@@ -46,25 +48,49 @@ Some improvements we'd love to see include:
 * No external dependencies (besides JUnit - which is only needed to run the test suite)
 
 ## Usage
-    // create a new bloom filter with the desired set of properties
-    final int expectedNumberOfItems = 10000;
-    final double desiredFalsePositiveRate = 0.00001;
-    BloomFilter bf = BloomFilter.createOptimal("/tmp/bloom.dat", expectedNumberOfItems, desiredFalsePositiveRate, true);
-   
-    // test out the bloom filter
-    bf.add("Hello World".getBytes());
-    System.out.println(bf.contains("Hello World".getBytes()));
-    System.out.println(bf.contains("Foo Bar".getBytes()));
 
-    // persist it to disk (note that it is only persisted to disk when you call flush)
-    bf.flush()
+    // if the 'file' is null, the bloom filter is in-memory only, and not-persisted to disk
+    final File onDiskFile = new File("/tmp/greplin-bloom-filter.bin");
+    final int expectedItems = 10000;
+    final double desiredFalsePositiveRate = 0.000001;
 
-    // try removing an item
-    bf.remove("Hello World".getBytes());
-    System.out.println(bf.contains("Hello World".getBytes()));
+    final byte[] exampleItemA = "Hello World!".getBytes(Charset.forName("UTF-8"));
+    final byte[] exampleItemB = "Goodbye Cruel world".getBytes(Charset.forName("UTF-8"));
 
-    // close the bloom filter (which also persists any unflushed changes)
-    bf.close();
+    BloomFilter bloomFilter = new BloomFilter.NewBuilder(onDiskFile, expectedItems, desiredFalsePositiveRate)
+        .force(true) // tells it to over-write any existing file at onDiskFile
+        .build();
+
+    System.out.println(bloomFilter.contains(exampleItemA)); // false
+    System.out.println(bloomFilter.contains(exampleItemB)); // false
+
+    bloomFilter.add(exampleItemA);
+    bloomFilter.add(exampleItemB);
+
+    System.out.println(bloomFilter.contains(exampleItemA)); // true
+    System.out.println(bloomFilter.contains(exampleItemB)); // true
+
+    bloomFilter.remove(exampleItemB);
+
+    System.out.println(bloomFilter.contains(exampleItemA)); // true
+    System.out.println(bloomFilter.contains(exampleItemB)); // false
+
+    bloomFilter.close();
+    bloomFilter = null;
+
+
+    // now, let's reopen the same bloom filter from the on-disk file
+    bloomFilter = new BloomFilter.OpenBuilder(onDiskFile).build();
+
+    System.out.println(bloomFilter.contains(exampleItemA)); // true
+    System.out.println(bloomFilter.contains(exampleItemB)); // false
+
+    bloomFilter.remove(exampleItemA);
+
+    System.out.println(bloomFilter.contains(exampleItemA)); // false
+    System.out.println(bloomFilter.contains(exampleItemB)); // false
+
+    bloomFilter.close();
 
 ## Authors
 [Greplin, Inc.](http://www.greplin.com)
