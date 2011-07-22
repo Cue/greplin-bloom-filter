@@ -788,6 +788,39 @@ public class BloomFilter implements Closeable {
     return cache;
   }
 
+  /**
+   * Useful for making a backup. Writes a guaranteed consistent snapshot of the bloom filter
+   * to disk. All flushes will be blocked while this snapshot is being taken.
+   *
+   * @param output The file this bloom filter should be copied to.
+   * @param force  If force is set to true and the outputFile already exists, it will be deleted
+   */
+  public void makeConsistentSnapshot(File output, boolean force) throws IOException {
+
+    if (output.exists()) {
+      if (force) {
+        output.delete();
+      } else {
+        throw new IOException("Snapshot file already exists - can't take snapshot");
+      }
+    }
+    
+    this.cacheLock.readLock().lock();
+    try {
+      RandomAccessFile snapshotFile = new RandomAccessFile(output, "rw");
+      try {
+        this.metadata.writeToFile(snapshotFile);
+        snapshotFile.setLength(this.metadata.getTotalLength());
+        snapshotFile.seek(this.metadata.getHeaderLength());
+        snapshotFile.write(cache);
+        snapshotFile.getFD().sync();
+      } finally {
+        snapshotFile.close();
+      }
+    } finally {
+      this.cacheLock.readLock().unlock();
+    }
+  }
 
   /**
    * Returns the length of the underlying bloom filter byte array.

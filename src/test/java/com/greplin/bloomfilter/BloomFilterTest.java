@@ -24,7 +24,6 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Random;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -442,6 +441,48 @@ public class BloomFilterTest {
     Assert.assertEquals(1, closeCallbackCalled.get());
   }
 
+  @Test
+  public void testSnapshotting() throws IOException {
+    BloomFilter bf = new BloomFilter.NewBuilder(TEMP_FILE, 1000, 0.00001)
+        .force(true)
+        .bucketSize(BucketSize.FOUR)
+        .build();
+
+    final byte[] data = "hello world".getBytes();
+    bf.add(data);
+    Assert.assertTrue(bf.contains(data));
+
+    File snapshotFile = File.createTempFile("bloom-snapshot", "test");
+    bf.makeConsistentSnapshot(snapshotFile, true);
+
+    BloomFilter snapshot = BloomFilter.openExisting(snapshotFile);
+
+    Assert.assertArrayEquals(bf.getUnderlyingDataBytes(), snapshot.getUnderlyingDataBytes());
+    Assert.assertEquals(bf.getHashFns(), snapshot.getHashFns());
+    Assert.assertEquals(bf.getTotalLength(), snapshot.getTotalLength());
+
+    Assert.assertTrue(bf.contains(data));
+
+    snapshot.close();
+
+    // make sure 'force' works as expected
+    boolean exceptionThrown = false;
+    try {
+      bf.makeConsistentSnapshot(snapshotFile, false);
+    } catch (IOException e) {
+      exceptionThrown = true;
+    }
+
+    Assert.assertTrue(exceptionThrown);
+
+    exceptionThrown = false;
+    try {
+      bf.makeConsistentSnapshot(snapshotFile, true);
+    } catch (IOException e) {
+      exceptionThrown = true;
+    }
+    Assert.assertFalse(exceptionThrown);
+  }
 
   private static String printBits(byte x) {
     String s = Integer.toBinaryString(x & 0xff);
