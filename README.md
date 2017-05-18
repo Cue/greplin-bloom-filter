@@ -39,7 +39,7 @@ Some improvements we'd love to see include:
 
 * This is a counting bloom filter that uses a configurable number of bits per bucket. If you use one bit per bucket, then items can never be deleted. If you use 8 bits per bucket, then it uses 8x more space than a non-counting filter, but items can be deleted as long as the count doesn't exceed 255 items in a bucket.
 
-* Instead of using N distinct hashes, we use linear combinations of two runs of a repeated murmur hash per [Kirch and Mitzenmacher] (http://www.eecs.harvard.edu/~kirsch/pubs/bbbf/esa06.pdf).
+* Instead of using N distinct hashes, we use linear combinations of two runs of a repeated murmur hash per [Kirch and Mitzenmacher] (https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf).
 
 * If you are using a persistent bloom filter, then on flush we intelligently decide to either rewrite the entire file or or just seek into the file and change particular bytes based on how much of the file has changed. 
 
